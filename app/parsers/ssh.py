@@ -2,6 +2,7 @@
 
 import re
 from datetime import datetime, tzinfo as Timezone
+from typing import Optional
 
 from app.models.event import LoginEvent, LoginResult, SourceType
 from app.parsers.base import ParseError, normalize_ip
@@ -27,7 +28,7 @@ _FAILED = re.compile(
 _MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 
-def parse_ssh_line(line: str, *, year: int, tzinfo: Timezone) -> LoginEvent | None:
+def parse_ssh_line(line: str, *, year: int, tzinfo: Timezone) -> Optional[LoginEvent]:
     """Return None for unrelated messages; raise ParseError for damaged targets.
 
     No year rollover inference is performed. Publickey metadata after ssh2 is

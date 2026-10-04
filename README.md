@@ -2,7 +2,7 @@
 
 面向小型 Web 应用与 Linux SSH 登录场景的轻量级登录异常监测与告警系统。
 
-**Current status: Stage 1 parsers**
+**Current status: Stage 1 parsers (Python 3.8+ compatible)**
 
 已实现统一 `LoginEvent`、SSH parser、Web parser、parser 单元测试及脱敏样例。
 原有 FastAPI `GET /api/health` 与 smoke test 保持不变。
@@ -11,8 +11,13 @@
 ## 技术栈与目标架构
 
 技术栈：Python、FastAPI、SQLite、Python 正则表达式、ECharts、Linux、pytest。
-无需 Docker 或外部数据库、消息队列。当前最低 Python 版本为 3.10；
-服务器版本尚待独立验证，不假设服务器使用 Python 3.12。
+无需 Docker 或外部数据库、消息队列。
+
+Minimum supported runtime: Python 3.8
+
+Recommended development runtime: Python 3.10+
+
+保留 Python 3.8 兼容性，以便在 Ubuntu 20.04 类主机上轻量部署。
 
 目标数据流（当前仅实现 parsers 与统一事件，其他环节尚未实现）：
 
@@ -33,7 +38,7 @@ Web / SSH logs → collectors → parsers → normalized events
 
 ## 本地安装
 
-在仓库根目录执行（Linux / WSL，Python 3.10+）：
+在仓库根目录执行（Linux / WSL，Python 3.8+，开发推荐 3.10+）：
 
 ```bash
 python3 -m venv .venv
@@ -123,6 +128,6 @@ event = parse_web_line(web)
 人工核查与误报标记、查询 API 和 ECharts 展示。规则测试将覆盖正常输错、
 连续失败、共享 IP 和窗口边界。
 
-具体阶段与顺序由 ChatGPT 主审查窗口决定。Stage 1 提交并推送后停止，
+具体阶段与顺序由 ChatGPT 主审查窗口决定。Stage 1.1 兼容性验证完成后停止，
 审查通过并收到下一阶段指令后才继续。服务器只拉取 GitHub exact commit SHA
 进行独立测试和运行验证。角色及修改纪律见 `AGENTS.md`。

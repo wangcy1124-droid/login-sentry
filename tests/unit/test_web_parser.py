@@ -26,6 +26,11 @@ def test_results(result, expected):
     ("2026-10-05T05:42:12Z", timedelta(0), 0),
     ("2026-10-05T13:42:12+08:00", timedelta(hours=8), 0),
     ("2026-10-05T01:42:12-04:00", timedelta(hours=-4), 0),
+    ("2026-10-05T05:42:12.1Z", timedelta(0), 100000),
+    ("2026-10-05T13:42:12.12+08:00", timedelta(hours=8), 120000),
+    ("2026-10-05T05:42:12.123Z", timedelta(0), 123000),
+    ("2026-10-05T01:42:12.1234-04:00", timedelta(hours=-4), 123400),
+    ("2026-10-05T05:42:12.12345Z", timedelta(0), 123450),
     ("2026-10-05T05:42:12.123456Z", timedelta(0), 123456),
 ])
 def test_timezone(timestamp, offset, microsecond):
@@ -33,6 +38,7 @@ def test_timezone(timestamp, offset, microsecond):
     assert event.timestamp.tzinfo is not None
     assert event.timestamp.utcoffset() == offset
     assert event.timestamp.microsecond == microsecond
+    assert event.raw_log == line(timestamp=timestamp)
     assert event.timestamp.astimezone(timezone.utc) == datetime(2026, 10, 5, 5, 42, 12, microsecond, tzinfo=timezone.utc)
 
 

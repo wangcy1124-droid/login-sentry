@@ -20,7 +20,9 @@ def make_event(**changes):
         result=LoginResult.SUCCESS,
         raw_log="original log",
     )
-    return LoginEvent(**(fields | changes))
+    merged = fields.copy()
+    merged.update(changes)
+    return LoginEvent(**merged)
 
 
 def test_event_fields_and_immutability():

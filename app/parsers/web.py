@@ -2,19 +2,20 @@
 
 import re
 from datetime import datetime
+from typing import Dict, Optional
 
 from app.models.event import LoginEvent, LoginResult, SourceType
 from app.parsers.base import ParseError, normalize_ip
 
 _TIMESTAMP = re.compile(
     r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
-    r"(?:\.[0-9]{1,6})?(?:Z|[+-][0-9]{2}:[0-9]{2})?"
+    r"(?:\.(?P<fraction>[0-9]{1,6}))?(?:Z|[+-][0-9]{2}:[0-9]{2})?"
 )
 _USERNAME = re.compile(r"[A-Za-z0-9_.@-]+")
 _FIELDS = ("username", "ip", "result")
 
 
-def parse_web_line(line: str) -> LoginEvent | None:
+def parse_web_line(line: str) -> Optional[LoginEvent]:
     """Parse ordered username/ip/result tokens; ignore non-LOGIN records."""
     raw = line.rstrip("\r\n")
     tokens = raw.split()
@@ -26,7 +27,7 @@ def parse_web_line(line: str) -> LoginEvent | None:
         return None
     if "\n" in raw or "\r" in raw:
         raise ParseError("web login event must occupy one line")
-    fields: dict[str, str] = {}
+    fields: Dict[str, str] = {}
     for token in tokens[2:]:
         key, separator, value = token.partition("=")
         if not separator or key not in _FIELDS:
@@ -44,9 +45,14 @@ def parse_web_line(line: str) -> LoginEvent | None:
     if fields["result"] not in ("SUCCESS", "FAILURE"):
         raise ParseError("invalid web login result: expected SUCCESS or FAILURE")
     value = tokens[0]
-    if _TIMESTAMP.fullmatch(value) is None:
+    timestamp_match = _TIMESTAMP.fullmatch(value)
+    if timestamp_match is None:
         raise ParseError("invalid web login timestamp")
-    # Python 3.10 does not accept Z in datetime.fromisoformat.
+    # Python 3.8 accepts only 3 or 6 fractional digits in fromisoformat.
+    fraction = timestamp_match["fraction"]
+    if fraction is not None:
+        value = value.replace("." + fraction, "." + fraction.ljust(6, "0"), 1)
+    # Python 3.8-3.10 do not accept Z in datetime.fromisoformat.
     if value.endswith("Z"):
         value = value[:-1] + "+00:00"
     elif len(value) >= 6 and value[-6] in ("+", "-"):
