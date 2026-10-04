@@ -2,11 +2,12 @@
 
 面向小型 Web 应用与 Linux SSH 登录场景的轻量级登录异常监测与告警系统。
 
-**Current status: Stage 1 parsers (Python 3.8+ compatible)**
+**Current status: Stage 2 persistence and incremental collection**
 
-已实现统一 `LoginEvent`、SSH parser、Web parser、parser 单元测试及脱敏样例。
-原有 FastAPI `GET /api/health` 与 smoke test 保持不变。
-尚未实现 collector、SQLite、detection、alert、API query 或 Dashboard。
+已实现统一 `LoginEvent`、SSH/Web parser、SQLite `login_events` 与
+`collector_offsets`、二进制增量读取、重启续读及一次性采集 CLI。
+原有 FastAPI `GET /api/health` 保持不变。尚未实现检测规则、告警聚合、
+FastAPI 查询 API 或 Dashboard。
 
 ## 技术栈与目标架构
 
@@ -19,7 +20,7 @@ Recommended development runtime: Python 3.10+
 
 保留 Python 3.8 兼容性，以便在 Ubuntu 20.04 类主机上轻量部署。
 
-目标数据流（当前仅实现 parsers 与统一事件，其他环节尚未实现）：
+目标数据流（当前已实现 collectors、parsers、统一事件和 SQLite；检测、告警与展示尚未实现）：
 
 ```text
 Web / SSH logs → collectors → parsers → normalized events
@@ -33,7 +34,7 @@ Web / SSH logs → collectors → parsers → normalized events
 
 `collectors` 负责增量读取；`parsers` 负责解析与规范化；`detectors`
 负责可独立测试的规则；`alerts` 负责聚合、冷却和人工核查。
-`db`、`models`、`services`、`api` 预留持久化、模型、编排与查询边界；
+`db`、`models`、`services` 分别提供持久化、模型与采集编排，`api` 预留查询边界；
 `templates`、`static` 预留前端资源。未来时间逻辑须支持确定时间注入。
 
 ## 本地安装
@@ -70,7 +71,7 @@ curl http://127.0.0.1:8000/api/health
 
 ```bash
 source .venv/bin/activate
-python -m compileall app
+python -m compileall app scripts
 pytest -q
 git diff --check
 ```
@@ -113,21 +114,58 @@ event = parse_web_line(web)
 `samples/ssh.log` 和 `samples/web.log` 使用 RFC 5737 / RFC 3849 文档地址，
 包含成功、失败和无关行；均为虚构日志，不含真实基础设施数据。
 
+## 一次性增量采集
+
+先按上文安装项目，在仓库根目录激活虚拟环境后执行：
+
+```bash
+python scripts/ingest_file.py --type web --path samples/web.log --database data/login-sentry.sqlite3
+python scripts/ingest_file.py --type ssh --path samples/ssh.log --database data/login-sentry.sqlite3 --year 2026 --timezone +00:00
+```
+
+输出 `lines_read`、`events_inserted`、`ignored_lines`、`parse_errors`。
+首次采集样例分别写入 Web 3 条、SSH 4 条事件；文件未变化时再次运行均为 0。
+默认数据库为 `data/login-sentry.sqlite3`，首次打开自动幂等建表及索引。
+自定义数据库的父目录须已存在。SSH 必须显式提供 year 和 timezone，
+支持 `Z`、`+00:00`、`+08:00`、`-04:00`；负偏移使用 `--timezone=-04:00`。
+
+采集器以 `rb` 读取，只在遇到 LF 后处理完整行（支持 CRLF）。UTF-8 无效字节
+用 U+FFFD 替换，再交给 parser；不会按 Unicode 分隔符拆行。末尾无换行的
+半行保持未消费，后续补齐后再处理。无关行推进偏移并计入 ignored；
+`ParseError` 推进偏移并单独计数，避免坏行永久阻塞。其他异常向调用者传播。
+
+每条完整行的可选事件插入与偏移更新使用同一个 SQLite 事务；数据库失败时
+两者一起回滚，之前已提交的行保留。仓库写方法不自行 commit，由调用者管理
+事务。采集器要求空闲、启用事务的连接。UTC 存储格式固定为带 6 位小数秒和
+`+00:00` 的 ISO 时间，读取时恢复 aware UTC datetime 与枚举。
+创建/更新时间由可注入 clock 提供；事件时间始终来自日志/显式 SSH 上下文。
+
+状态键使用 `Path.resolve()` 的绝对路径，包含已打开文件描述符的 inode 与
+下一读取位置的字节偏移。相同 inode 且文件大小不小于偏移时续读；大小小于
+偏移时从 0 开始；inode 变化时读取当前路径的新文件。空文件或仅含半行的新
+文件可保存偏移 0。负偏移/非法 inode 会报错，输入文件缺失不会自动创建。
+两次内容完全相同的登录仍可分别存储，避免重复依靠持久化偏移而非事件唯一约束。
+
+当前限制：同步一次性执行，假设每个数据库/来源工作流只有一个写入者；
+不追读轮转后重命名的旧文件，也不处理动态符号链接轮转方案。若截断后已重新
+增长到保存偏移以上，仅凭 inode/size 无法识别；并发写入中的任意截断亦不保证
+无遗漏。保持同一来源的 parser 类型与 SSH 上下文稳定；本阶段没有后台轮询。
+
 ## 配置与运行数据
 
-`config/default.toml` 仅预留后续配置，目前不加载。预留默认规则为
+`config/default.toml` 仍不动态加载；CLI 直接提供数据库路径。预留默认规则为
 60 秒内 5 次失败、300 秒内尝试 4 个不同账号，规则均未实现。
-`data/` 存放未来运行数据，除 `.gitkeep` 外不提交 Git；`samples/`
-保存脱敏样例，`scripts/` 预留辅助脚本，`tests/unit/` 包含模型和解析器测试，
+`data/` 存放运行数据，除 `.gitkeep` 外不提交 Git；`samples/`
+保存脱敏样例，`scripts/` 提供采集 CLI，`tests/unit/` 与 `tests/integration/`
+包含模型、解析器、数据库、采集与 CLI 测试，
 `tests/scenarios/` 预留后续场景测试。禁止提交凭据和运行日志。
 
 ## 后续开发
 
-后续范围包括增量采集、SQLite 持久化、
-可配置窗口与阈值、失败频率和多账号规则、告警聚合及冷却、原始日志追溯、
+后续范围包括可配置窗口与阈值、失败频率和多账号规则、告警聚合及冷却、原始日志追溯、
 人工核查与误报标记、查询 API 和 ECharts 展示。规则测试将覆盖正常输错、
 连续失败、共享 IP 和窗口边界。
 
-具体阶段与顺序由 ChatGPT 主审查窗口决定。Stage 1.1 兼容性验证完成后停止，
+具体阶段与顺序由 ChatGPT 主审查窗口决定。Stage 2 提交并推送后停止，
 审查通过并收到下一阶段指令后才继续。服务器只拉取 GitHub exact commit SHA
 进行独立测试和运行验证。角色及修改纪律见 `AGENTS.md`。
