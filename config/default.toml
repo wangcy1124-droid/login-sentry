@@ -1,0 +1,17 @@
+# Reserved defaults for later stages; Stage 0 does not load this file.
+[app]
+name = "login-sentry"
+
+[database]
+path = "data/login-sentry.sqlite3"
+
+[collector]
+poll_interval_seconds = 1
+
+[rules.failure_burst]
+window_seconds = 60
+threshold = 5
+
+[rules.multi_account]
+window_seconds = 300
+distinct_username_threshold = 4
