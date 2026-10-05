@@ -34,7 +34,10 @@ def test_ingest_then_detect_and_empty_database(tmp_path):
     try:
         assert LoginEventRepository(connection).count() == 9
         tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        assert tables == {'login_events', 'collector_offsets', 'sqlite_sequence'}
+        assert tables == {'login_events', 'collector_offsets', 'sqlite_sequence', 'alerts', 'alert_occurrences', 'alert_event_links'}
+        assert connection.execute('SELECT COUNT(*) FROM alerts').fetchone()[0] == 0
+        assert connection.execute('SELECT COUNT(*) FROM alert_occurrences').fetchone()[0] == 0
+        assert connection.execute('SELECT COUNT(*) FROM alert_event_links').fetchone()[0] == 0
     finally:
         connection.close()
 

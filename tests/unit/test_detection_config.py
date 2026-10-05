@@ -77,3 +77,21 @@ def test_dynamic_threshold_from_file(tmp_path, detection_db, persist_event, old,
     path = tmp_path / 'custom.toml'
     path.write_text(DEFAULT.read_text().replace(old, new))
     assert [match.rule_type.value for match in detect(detection_db, load_config(path)).matches] == [rule]
+
+
+def test_default_cooldowns(rules):
+    assert rules.failure_burst.cooldown_seconds == 300
+    assert rules.multi_account.cooldown_seconds == 600
+
+
+@pytest.mark.parametrize('old,new', [('cooldown_seconds = 300', ''),
+    ('cooldown_seconds = 300', 'cooldown_seconds = 0'),
+    ('cooldown_seconds = 600', 'cooldown_seconds = -1'),
+    ('cooldown_seconds = 300', 'cooldown_seconds = true'),
+    ('cooldown_seconds = 600', 'cooldown_seconds = "600"'),
+    ('cooldown_seconds = 300', 'cooldown_seconds = 300\nunknown = 1')])
+def test_strict_cooldown_toml(tmp_path, old, new):
+    path = tmp_path / 'config.toml'
+    path.write_text(DEFAULT.read_text().replace(old, new))
+    with pytest.raises(ConfigurationError):
+        load_config(path)

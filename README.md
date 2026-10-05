@@ -2,13 +2,14 @@
 
 面向小型 Web 应用与 Linux SSH 登录场景的轻量级登录异常监测与告警系统。
 
-**Current status: Stage 3 anomaly detection**
+**Current status: Stage 4 alert aggregation and review**
 
 已实现统一 `LoginEvent`、SSH/Web parser、SQLite `login_events` 与
 `collector_offsets`、二进制增量读取、重启续读及一次性采集 CLI。
 另已实现 failure_burst、multi_account、动态规则配置及一次性检测 CLI。
-原有 FastAPI `GET /api/health` 保持不变。尚未实现告警聚合、冷却、人工核查状态、
-通知、FastAPI 查询 API 或 Dashboard。
+已实现持久化告警聚合、冷却、人工核查和事件追溯。
+原有 FastAPI `GET /api/health` 保持不变。尚未实现真实通知、FastAPI 查询 API、
+Dashboard 或 ECharts 展示。
 
 ## 技术栈与目标架构
 
@@ -21,7 +22,7 @@ Recommended development runtime: Python 3.10+
 
 保留 Python 3.8 兼容性，以便在 Ubuntu 20.04 类主机上轻量部署。
 
-目标数据流（当前已实现采集、解析、统一事件、SQLite 和检测；告警与展示尚未实现）：
+目标数据流（当前已实现采集、解析、统一事件、SQLite、检测和告警；展示尚未实现）：
 
 ```text
 Web / SSH logs → collectors → parsers → normalized events
@@ -186,10 +187,52 @@ end_time=None)` 可指定 aware 时间范围；转换为 UTC 后由参数化 SQL
 未指定范围则评估全部已存失败，没有隐式当前时间截止。倒置范围和 naive 时间
 会报错。纯规则函数只处理事件序列，不访问数据库或文件。
 
-`config/default.toml` 的两个规则表要求 `enabled` 布尔值、正整数 window_seconds
-和对应阈值；拒绝缺字段、未知字段、错误类型及 bool 冒充整数。修改 TOML 后下一次
+`config/default.toml` 的两个规则表要求 `enabled` 布尔值、正整数 window_seconds、
+对应阈值和 cooldown_seconds；拒绝缺字段、未知字段、错误类型及 bool 冒充整数。修改 TOML 后下一次
 加载即可生效；`enabled=false` 独立关闭对应规则。显式配置路径缺失或格式错误
 直接报错，不回退。Python 3.8–3.10 使用轻量 tomli，3.11+ 使用标准库 tomllib。
+
+## 告警聚合与人工核查
+
+```bash
+python scripts/process_alerts.py --database data/login-sentry.sqlite3 --config config/default.toml
+python scripts/review_alert.py --database data/login-sentry.sqlite3 --alert-id 1 --status false_positive --note "shared office NAT"
+```
+
+处理命令先加载配置，再初始化数据库、检测和处理匹配。新空库输出全零统计。
+输出 matches_seen、alerts_created、alerts_aggregated、duplicate_occurrences、links_added。
+检测 CLI 仍然不写告警记录；schema 初始化会添加空的告警表。
+
+fingerprint 是稳定文本 `rule_type|source_ip`，不同规则或 IP 分开处理。
+failure_burst 严重度 medium、冷却 300 秒；multi_account 严重度 high、冷却
+600 秒。配置中的 cooldown_seconds 必须是正整数，不接受 bool、缺字段或未知字段；
+Python 配置对象保留默认冷却值，已有三参数构造仍兼容。
+
+只选择同 fingerprint 最新（last_seen、id 降序）的 open/confirmed 告警。
+新 occurrence 的 window_end <= last_seen + cooldown 时聚合，恰好边界包含，
+多 1 微秒则新建。乱序旧匹配也归入最新活动告警，first_seen 取最小值，last_seen
+取最大值，绝不倒退；不会回溯重组旧告警。冷却用于聚合，未实现任何通知发送。
+
+occurrence_count 是不同 DetectionMatch 的数量，不是事件数量。occurrence key
+使用规则、IP、UTC 窗口起止和排序后的真实事件 ID 的 JSON 做 SHA-256。
+完全相同匹配重复运行、进程重启或人工关闭后再次运行均只计 duplicate_occurrences，
+不递增次数、不增加链接。已有簇因追加事件或改配置而改变匹配身份时，是新的 occurrence；
+链接取并集，即使匹配包含重叠事件也不重复链接。
+
+每个 occurrence 的告警插入/更新、occurrence 写入、事件链接位于同一事务；任一步
+失败全部回滚，之前已提交的 occurrence 保留。要求单写入者、空闲且启用事务的连接。
+时间存储沿用固定 6 位小数 UTC；事件窗口来自匹配，元数据时钟可注入。
+初始化旧数据库只添加表/索引，不删除原有事件和偏移。
+
+核查允许 open → confirmed/false_positive/resolved，以及 confirmed →
+false_positive/resolved。拒绝同状态重复操作、关闭后重开及其他转换。
+confirmed 聚合仍保持 confirmed；false_positive/resolved 为关闭历史，新的
+occurrence 创建 open 告警，不复用关闭记录。核查不删除事件、occurrence 或链接。
+review_note 允许 None、空字符串（原样保存）及最多 2000 字符普通文本。
+
+`AlertRepository.list_events(alert_id)` 返回带真实 SQLite ID 的 StoredLoginEvent，
+按 timestamp/id 排序，可沿 `record.event.raw_log` 追溯原始日志。
+`alerts` 不重复保存 raw_log；`alert_event_links` 使用复合主键和外键防止重复/孤立链接。
 
 ## 配置与运行数据
 
@@ -201,9 +244,9 @@ end_time=None)` 可指定 aware 时间范围；转换为 UTC 后由参数化 SQL
 
 ## 后续开发
 
-后续范围包括告警聚合及冷却、告警关联原始日志追溯、
-人工核查与误报标记、查询 API 和 ECharts 展示。检测结果目前只返回可追溯事件 ID，不创建告警。
+后续范围包括查询 API、ECharts 展示和真实通知。检测本身仍只返回匹配，
+独立告警服务负责持久化与核查。
 
-具体阶段与顺序由 ChatGPT 主审查窗口决定。Stage 3 提交并推送后停止，
+具体阶段与顺序由 ChatGPT 主审查窗口决定。Stage 4 提交并推送后停止，
 审查通过并收到下一阶段指令后才继续。服务器只拉取 GitHub exact commit SHA
 进行独立测试和运行验证。角色及修改纪律见 `AGENTS.md`。

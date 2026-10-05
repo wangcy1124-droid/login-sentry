@@ -1,4 +1,4 @@
-# Stage 3 loads only [rules]; other sections remain reserved.
+# Stage 4 loads only [rules]; other sections remain reserved.
 [app]
 name = "login-sentry"
 
@@ -12,8 +12,10 @@ poll_interval_seconds = 1
 enabled = true
 window_seconds = 60
 threshold = 5
+cooldown_seconds = 300
 
 [rules.multi_account]
 enabled = true
 window_seconds = 300
 distinct_username_threshold = 4
+cooldown_seconds = 600
