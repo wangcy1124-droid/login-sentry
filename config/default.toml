@@ -1,4 +1,4 @@
-# Reserved defaults for later stages; Stage 0 does not load this file.
+# Stage 3 loads only [rules]; other sections remain reserved.
 [app]
 name = "login-sentry"
 
@@ -9,9 +9,11 @@ path = "data/login-sentry.sqlite3"
 poll_interval_seconds = 1
 
 [rules.failure_burst]
+enabled = true
 window_seconds = 60
 threshold = 5
 
 [rules.multi_account]
+enabled = true
 window_seconds = 300
 distinct_username_threshold = 4

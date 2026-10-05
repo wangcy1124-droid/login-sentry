@@ -2,12 +2,13 @@
 
 面向小型 Web 应用与 Linux SSH 登录场景的轻量级登录异常监测与告警系统。
 
-**Current status: Stage 2 persistence and incremental collection**
+**Current status: Stage 3 anomaly detection**
 
 已实现统一 `LoginEvent`、SSH/Web parser、SQLite `login_events` 与
 `collector_offsets`、二进制增量读取、重启续读及一次性采集 CLI。
-原有 FastAPI `GET /api/health` 保持不变。尚未实现检测规则、告警聚合、
-FastAPI 查询 API 或 Dashboard。
+另已实现 failure_burst、multi_account、动态规则配置及一次性检测 CLI。
+原有 FastAPI `GET /api/health` 保持不变。尚未实现告警聚合、冷却、人工核查状态、
+通知、FastAPI 查询 API 或 Dashboard。
 
 ## 技术栈与目标架构
 
@@ -20,7 +21,7 @@ Recommended development runtime: Python 3.10+
 
 保留 Python 3.8 兼容性，以便在 Ubuntu 20.04 类主机上轻量部署。
 
-目标数据流（当前已实现 collectors、parsers、统一事件和 SQLite；检测、告警与展示尚未实现）：
+目标数据流（当前已实现采集、解析、统一事件、SQLite 和检测；告警与展示尚未实现）：
 
 ```text
 Web / SSH logs → collectors → parsers → normalized events
@@ -151,21 +152,58 @@ python scripts/ingest_file.py --type ssh --path samples/ssh.log --database data/
 增长到保存偏移以上，仅凭 inode/size 无法识别；并发写入中的任意截断亦不保证
 无遗漏。保持同一来源的 parser 类型与 SSH 上下文稳定；本阶段没有后台轮询。
 
+## 异常检测
+
+```bash
+python scripts/detect_anomalies.py --database data/login-sentry.sqlite3 --config config/default.toml
+```
+
+命令一次性评估已保存事件，输出规则、IP、实际事件数、不同用户名数、窗口起止
+和 SQLite event_ids，最后输出 `matches=N`。不打印 raw_log，不写入告警。
+数据库不存在时初始化空 schema 并输出 `matches=0`（父目录须存在）；空数据库
+同样返回 0。重复检测相同数据库/config 输出一致，不保存检测状态。
+
+默认配置：failure_burst 为 60 秒内至少 5 次失败；multi_account 为 300 秒内
+失败尝试至少 4 个不同用户名。两条规则都仅计 FAILURE；成功登录不计数。
+因此共享 NAT IP 下多个用户成功登录不会仅因账号多而触发。SSH/Web 合并按
+规范化 source_ip 分组，支持 IPv4/IPv6，同一事件簇可以同时触发两条规则。
+
+候选窗口 `[T - window_seconds, T]` 两端包含；边界恰好等于窗口时计入，
+多 1 微秒则移出。每个 IP 输入按 timestamp/id 升序。算法使用双指针和活动
+用户名计数表，每个 IP 线性扫描；不为每条事件重复生成重叠匹配：
+
+1. 尚未达标时滑动左边界，移出过期失败。
+2. 首次达标后固定当前最早事件，纳入仍在该时限内的后续失败。
+3. 下一条超出时输出当前簇，从该下一条重新开始；不会重用前簇尾部生成重叠匹配。
+
+这是有界、不重叠的贪心合并策略，每个匹配跨度不超过配置窗口；它不枚举所有
+可能的重叠窗口。`window_start/end` 是实际纳入事件的最早/最晚时间，event_ids
+按 timestamp/id 排序且簇内唯一。输出按 window_end、source_ip、rule_type 排序。
+
+Python 服务 `app.services.detection.detect(connection, config, start_time=None,
+end_time=None)` 可指定 aware 时间范围；转换为 UTC 后由参数化 SQLite 查询
+筛选范围内失败。范围也是双端包含，范围外事件不作为窗口上下文补入。
+未指定范围则评估全部已存失败，没有隐式当前时间截止。倒置范围和 naive 时间
+会报错。纯规则函数只处理事件序列，不访问数据库或文件。
+
+`config/default.toml` 的两个规则表要求 `enabled` 布尔值、正整数 window_seconds
+和对应阈值；拒绝缺字段、未知字段、错误类型及 bool 冒充整数。修改 TOML 后下一次
+加载即可生效；`enabled=false` 独立关闭对应规则。显式配置路径缺失或格式错误
+直接报错，不回退。Python 3.8–3.10 使用轻量 tomli，3.11+ 使用标准库 tomllib。
+
 ## 配置与运行数据
 
-`config/default.toml` 仍不动态加载；CLI 直接提供数据库路径。预留默认规则为
-60 秒内 5 次失败、300 秒内尝试 4 个不同账号，规则均未实现。
+`config/default.toml` 当前仅加载 `[rules]`。其他配置段仍预留，数据库路径由 CLI 提供。
 `data/` 存放运行数据，除 `.gitkeep` 外不提交 Git；`samples/`
 保存脱敏样例，`scripts/` 提供采集 CLI，`tests/unit/` 与 `tests/integration/`
-包含模型、解析器、数据库、采集与 CLI 测试，
-`tests/scenarios/` 预留后续场景测试。禁止提交凭据和运行日志。
+包含模型、解析器、数据库、采集、检测与 CLI 测试；
+`tests/scenarios/` 包含正常输错、连续失败、共享 IP 与窗口边界四类持久化场景测试。禁止提交凭据和运行日志。
 
 ## 后续开发
 
-后续范围包括可配置窗口与阈值、失败频率和多账号规则、告警聚合及冷却、原始日志追溯、
-人工核查与误报标记、查询 API 和 ECharts 展示。规则测试将覆盖正常输错、
-连续失败、共享 IP 和窗口边界。
+后续范围包括告警聚合及冷却、告警关联原始日志追溯、
+人工核查与误报标记、查询 API 和 ECharts 展示。检测结果目前只返回可追溯事件 ID，不创建告警。
 
-具体阶段与顺序由 ChatGPT 主审查窗口决定。Stage 2 提交并推送后停止，
+具体阶段与顺序由 ChatGPT 主审查窗口决定。Stage 3 提交并推送后停止，
 审查通过并收到下一阶段指令后才继续。服务器只拉取 GitHub exact commit SHA
 进行独立测试和运行验证。角色及修改纪律见 `AGENTS.md`。

@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, List, Optional, Union
 
+from app.models.detection import StoredLoginEvent
 from app.models.event import LoginEvent, LoginResult, SourceType
 
 
@@ -74,6 +75,30 @@ class LoginEventRepository:
 
     def list_all(self) -> List[LoginEvent]:
         return [self._event(row) for row in self.connection.execute("SELECT * FROM login_events ORDER BY id")]
+
+
+    def list_between(
+        self, start_time: Optional[datetime] = None, end_time: Optional[datetime] = None,
+        *, source_ip: Optional[str] = None, result: Optional[LoginResult] = None,
+    ) -> List[StoredLoginEvent]:
+        start = utc_text(start_time) if start_time is not None else None
+        end = utc_text(end_time) if end_time is not None else None
+        if start is not None and end is not None and start > end:
+            raise ValueError("start_time must not exceed end_time")
+        predicates = []
+        parameters = []
+        for clause, value in (("timestamp_utc >= ?", start), ("timestamp_utc <= ?", end),
+                              ("source_ip = ?", source_ip),
+                              ("result = ?", result.value if result is not None else None)):
+            if value is not None:
+                predicates.append(clause)
+                parameters.append(value)
+        sql = "SELECT * FROM login_events"
+        if predicates:
+            sql += " WHERE " + " AND ".join(predicates)
+        sql += " ORDER BY timestamp_utc, id"
+        return [StoredLoginEvent(row["id"], self._event(row))
+                for row in self.connection.execute(sql, parameters)]
 
 
 class CollectorOffsetRepository:
