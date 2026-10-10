@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Login Sentry · 安全态势</title>
+  <link rel="stylesheet" href="{{ url_for('static', path='dashboard.css') }}">
+  <script defer src="https://cdn.jsdelivr.net/npm/echarts@5.6.0/dist/echarts.min.js"></script>
+  <script defer src="{{ url_for('static', path='dashboard.js') }}"></script>
+</head>
+<body>
+<main>
+  <header><div><span class="eyebrow">LOGIN SENTRY / SECURITY OVERVIEW</span><h1>登录安全态势</h1><p>从异常行为到原始事件，一处查看。</p></div><button id="refresh">刷新数据</button></header>
+  <p id="message" role="status" aria-live="polite">正在加载…</p>
+  <section class="cards" aria-label="告警统计">
+    <article><span>Total Alerts · 全部告警</span><strong id="total">—</strong></article>
+    <article><span>Open Alerts · 待核查</span><strong id="open">—</strong></article>
+    <article><span>Confirmed Alerts · 已确认</span><strong id="confirmed">—</strong></article>
+  </section>
+  <section class="charts">
+    <article class="wide"><h2>告警趋势 <small>最近 7 个 UTC 日期 · 按首次发生时间</small></h2><div id="trend" class="chart" role="img" aria-label="每日告警数量折线图"></div></article>
+    <article><h2>来源 IP <small>告警数量 Top 10</small></h2><div id="sources" class="chart" role="img" aria-label="来源 IP 告警数量柱状图"></div></article>
+    <article><h2>规则分布 <small>全部历史告警</small></h2><div id="rules" class="chart" role="img" aria-label="规则类型饼图"></div></article>
+  </section>
+  <section class="panel"><div class="toolbar"><h2>告警记录</h2><label>状态 <select id="status"><option value="">全部</option><option value="open">待核查</option><option value="confirmed">已确认</option><option value="false_positive">误报</option><option value="resolved">已解决</option></select></label></div>
+    <div class="scroll"><table><thead><tr><th>ID</th><th>来源 IP</th><th>规则</th><th>状态</th><th>次数</th><th>最近发生（UTC）</th><th>追溯</th></tr></thead><tbody id="alerts"></tbody></table></div>
+    <div class="pagination"><span id="page"></span><button id="previous" disabled>上一页</button><button id="next" disabled>下一页</button></div>
+  </section>
+  <section id="detail" class="panel" hidden><h2>告警事件追溯</h2><p id="detail-title"></p><pre id="event-details"></pre></section>
+  <footer>Login Sentry · 只读态势页 · 不发送通知</footer>
+</main>
+</body>
+</html>

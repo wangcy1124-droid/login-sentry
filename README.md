@@ -2,14 +2,14 @@
 
 面向小型 Web 应用与 Linux SSH 登录场景的轻量级登录异常监测与告警系统。
 
-**Current status: Stage 4 alert aggregation and review**
+**Current status: Stage 5 API and dashboard**
 
 已实现统一 `LoginEvent`、SSH/Web parser、SQLite `login_events` 与
 `collector_offsets`、二进制增量读取、重启续读及一次性采集 CLI。
 另已实现 failure_burst、multi_account、动态规则配置及一次性检测 CLI。
 已实现持久化告警聚合、冷却、人工核查和事件追溯。
-原有 FastAPI `GET /api/health` 保持不变。尚未实现真实通知、FastAPI 查询 API、
-Dashboard 或 ECharts 展示。
+已实现 FastAPI 查询 API、SQL 统计聚合和 Jinja2 / ECharts Dashboard。
+原有 `GET /api/health` 保持不变。尚未实现通知、认证或多用户管理。
 
 ## 技术栈与目标架构
 
@@ -22,7 +22,7 @@ Recommended development runtime: Python 3.10+
 
 保留 Python 3.8 兼容性，以便在 Ubuntu 20.04 类主机上轻量部署。
 
-目标数据流（当前已实现采集、解析、统一事件、SQLite、检测和告警；展示尚未实现）：
+目标数据流（当前已实现采集、解析、统一事件、SQLite、检测、告警和查询展示）：
 
 ```text
 Web / SSH logs → collectors → parsers → normalized events
@@ -234,6 +234,46 @@ review_note 允许 None、空字符串（原样保存）及最多 2000 字符普
 按 timestamp/id 排序，可沿 `record.event.raw_log` 追溯原始日志。
 `alerts` 不重复保存 raw_log；`alert_event_links` 使用复合主键和外键防止重复/孤立链接。
 
+## 查询 API 与 Dashboard
+
+启动后访问 `http://127.0.0.1:8000/`：三张告警统计卡、7 日趋势折线图、
+来源 IP 柱状图、规则分布饼图，以及带状态筛选和分页的告警表。
+点击“查看事件”可读取关联原始日志；页面只读，人工核查继续使用既有 CLI。
+页面使用 Jinja2 与固定版本 ECharts 5.6.0 CDN，不使用前端框架。
+CDN 需要浏览器可联网；加载失败时仍显示统计卡和告警表并提示原因。
+没有自动轮询，点击刷新获取最新数据。
+
+API 默认使用 `data/login-sentry.sqlite3`。可指定与采集 CLI 相同的数据库：
+
+```bash
+LOGIN_SENTRY_DATABASE=/absolute/path/events.sqlite3 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+父目录须存在；首次查询不存在的数据库时初始化空 schema。请求使用独立连接，
+同一响应内的读取处于一个事务；除幂等建表外不写业务记录。健康检查与页面本身
+不打开数据库。无认证，默认示例仅监听本机；不要将含原始日志的 API 直接公开。
+
+| Endpoint | 参数 / 返回 |
+| --- | --- |
+| `GET /api/alerts` | 可选 status、rule_type、source_ip；limit 默认 50（1–100）、offset 默认 0（非负）；返回 items、total |
+| `GET /api/alerts/{alert_id}` | alert 与 events；含真实事件 ID 和 raw_log |
+| `GET /api/events/{event_id}` | id、timestamp、source_type、source_ip、username、result、raw_log |
+| `GET /api/statistics/summary` | 总告警数及四种状态数量 |
+| `GET /api/statistics/trend` | days 默认 7（1–366），每日 date/count |
+| `GET /api/statistics/sources` | limit 默认 10（1–100），来源 IP/count |
+| `GET /api/statistics/rules` | rule_type/count |
+
+列表按 last_seen DESC、id DESC，total 为过滤后分页前总数；IP 过滤支持规范化
+IPv4/IPv6。状态与规则类型使用现有枚举值。参数非法返回 422，详情不存在返回 404。
+时间返回带时区的 ISO 8601，source_type 与 result 沿用小写枚举（ssh/web、success/failure）。
+链接事件按 timestamp、ID 升序。字符串在页面以纯文本显示。
+
+统计计数单位是告警行，不是 occurrence_count，也不是事件数。summary、sources、rules
+覆盖全部历史告警；sources 按数量降序、IP 升序，rules 按规则名排序。
+trend 按 first_seen 的 UTC 日期统计，从今天前 days−1 天的 00:00 到明天
+00:00（左闭右开），缺失日期补零；默认当前时间可在 create_app 的 clock 参数中
+注入以便测试。各统计使用 SQL GROUP BY，不将完整告警表加载到 Python。
+
 ## 配置与运行数据
 
 `config/default.toml` 当前仅加载 `[rules]`。其他配置段仍预留，数据库路径由 CLI 提供。
@@ -244,9 +284,9 @@ review_note 允许 None、空字符串（原样保存）及最多 2000 字符普
 
 ## 后续开发
 
-后续范围包括查询 API、ECharts 展示和真实通知。检测本身仍只返回匹配，
+尚未实现真实通知、认证和多用户管理。检测本身仍只返回匹配，
 独立告警服务负责持久化与核查。
 
-具体阶段与顺序由 ChatGPT 主审查窗口决定。Stage 4 提交并推送后停止，
+具体阶段与顺序由 ChatGPT 主审查窗口决定。Stage 5 提交并推送后停止，
 审查通过并收到下一阶段指令后才继续。服务器只拉取 GitHub exact commit SHA
 进行独立测试和运行验证。角色及修改纪律见 `AGENTS.md`。
