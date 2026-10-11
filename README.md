@@ -1,292 +1,277 @@
 # Login Sentry
 
-面向小型 Web 应用与 Linux SSH 登录场景的轻量级登录异常监测与告警系统。
+**登录异常监测与告警系统** · Python / FastAPI / SQLite / ECharts
 
-**Current status: Stage 5 API and dashboard**
+## 1. 项目简介
 
-已实现统一 `LoginEvent`、SSH/Web parser、SQLite `login_events` 与
-`collector_offsets`、二进制增量读取、重启续读及一次性采集 CLI。
-另已实现 failure_burst、multi_account、动态规则配置及一次性检测 CLI。
-已实现持久化告警聚合、冷却、人工核查和事件追溯。
-已实现 FastAPI 查询 API、SQL 统计聚合和 Jinja2 / ECharts Dashboard。
-原有 `GET /api/health` 保持不变。尚未实现通知、认证或多用户管理。
+Login Sentry 面向小型 Web 应用和 Linux 主机的登录安全场景，将 SSH 与 Web
+登录日志转换为统一事件，完成增量持久化、异常检测、告警聚合、人工核查和可视化查询。
 
-## 技术栈与目标架构
+项目采用 SQLite 和同步一次性处理流程，无需外部数据库或消息队列。
+当前已完成 **Stage 5：API 与 Dashboard**，适合用于理解和验证从原始日志到
+可追溯告警的完整处理链路。许可证：[MIT](LICENSE)。
 
-技术栈：Python、FastAPI、SQLite、Python 正则表达式、ECharts、Linux、pytest。
-无需 Docker 或外部数据库、消息队列。
+## 2. 系统架构
 
-Minimum supported runtime: Python 3.8
-
-Recommended development runtime: Python 3.10+
-
-保留 Python 3.8 兼容性，以便在 Ubuntu 20.04 类主机上轻量部署。
-
-目标数据流（当前已实现采集、解析、统一事件、SQLite、检测、告警和查询展示）：
-
-```text
-Web / SSH logs → collectors → parsers → normalized events
-                                      ↓
-                               detectors → alerts
-                                      ↓
-                                    SQLite
-                                      ↓
-                                FastAPI → ECharts
+```mermaid
+flowchart TD
+    SSH[SSH 登录日志] --> Collector[二进制增量文件采集]
+    Web[Web 登录日志] --> Collector
+    Collector --> Parser[SSH / Web Parser]
+    Parser --> Event[统一 LoginEvent]
+    Event --> Store[SQLite 事件持久化]
+    Collector --> Offsets[SQLite 采集偏移]
+    Store --> Detector[异常检测引擎]
+    Detector --> Match[DetectionMatch]
+    Match --> Manager[告警管理服务]
+    Manager --> Alerts[SQLite 告警 / occurrence / 事件链接]
+    Review[人工核查 CLI] --> Manager
+    Store --> Query[查询 Repository / Service]
+    Alerts --> Query
+    Query --> API[FastAPI 查询 API]
+    API --> Dashboard[Jinja2 / ECharts Dashboard]
 ```
 
-`collectors` 负责增量读取；`parsers` 负责解析与规范化；`detectors`
-负责可独立测试的规则；`alerts` 负责聚合、冷却和人工核查。
-`db`、`models`、`services` 分别提供持久化、模型与采集编排，`api` 预留查询边界；
-`templates`、`static` 预留前端资源。未来时间逻辑须支持确定时间注入。
+采集器负责文件读取，解析器负责规范化，检测器只生成匹配结果；独立告警服务处理
+持久化、聚合和核查。API 通过 Service 与 Repository 查询 SQLite，路由中不包含 SQL。
+事件与偏移更新使用同一事务；告警、occurrence 和事件链接也按 occurrence 原子提交。
 
-## 本地安装
+## 3. 核心功能
 
-在仓库根目录执行（Linux / WSL，Python 3.8+，开发推荐 3.10+）：
+### 3.1 日志采集与解析
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -e '.[test]'
-```
+- **SSH**：解析传统 syslog 格式的 Accepted password、Accepted publickey、
+  Failed password，以及 invalid user 失败记录。年份和时区由调用者显式提供。
+- **Web**：使用固定登录日志格式，支持 SUCCESS / FAILURE；时间必须包含时区。
+- **统一模型**：不可变 `LoginEvent` 包含 timestamp、source_type、source_ip、
+  username、result 和 raw_log。支持 IPv4/IPv6 规范化，时间为 timezone-aware datetime。
+- **解析结果**：成功返回事件，无关行返回 `None`，损坏的目标日志抛出 `ParseError`。
+  原始日志只去除末尾 CR/LF，保留其他内容用于追溯。
 
-若 Debian / Ubuntu 缺少 venv/ensurepip，需先由环境管理员安装与 Python
-版本匹配的 `python3-venv` 包。测试依赖包含 pytest 和 TestClient 使用的
-httpx。FastAPI 暂限 0.115 系列，以保留与 httpx TestClient 的兼容组合；
-依赖兼容性以实际安装后的 smoke test 为准。
-
-## 启动
-
-```bash
-source .venv/bin/activate
-python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
-```
-
-另一个终端验证：
-
-```bash
-curl http://127.0.0.1:8000/api/health
-```
-
-预期：`{"status":"ok","service":"login-sentry"}`。使用 Ctrl+C 停止服务。
-
-## 测试
-
-```bash
-source .venv/bin/activate
-python -m compileall app scripts
-pytest -q
-git diff --check
-```
-
-## 登录日志解析规范
-
-解析器是纯函数，不读取文件或保存数据：成功返回 `LoginEvent`，不相关行返回
-`None`，识别到目标但字段损坏时抛出 `app.parsers.base.ParseError`。
-事件使用不可变 dataclass，来源为 `SourceType.SSH/WEB`，结果为
-`LoginResult.SUCCESS/FAILURE`，timestamp 必须带有效时区，IP 由解析器验证
-并规范化。`raw_log` 仅去除末尾 CR/LF，保留其他空白。
-
-Web 格式固定，字段顺序为 username、ip、result，不允许重复或额外字段：
+Web 示例（字段顺序固定，标记区分大小写）：
 
 ```text
 2026-10-05T13:42:12+08:00 LOGIN username=alice ip=192.0.2.10 result=SUCCESS
 ```
 
-`LOGIN`、`SUCCESS`、`FAILURE` 区分大小写。用户名允许 ASCII 字母、数字、
-`_`、`-`、`.`、`@`，且不可为空。IP 支持 IPv4/IPv6。timestamp 使用
-`YYYY-MM-DDTHH:MM:SS[.ffffff]` 加 `Z` 或 `±HH:MM`，小数秒支持 1–6 位；
-缺时区或无效日期会报错。字段间允许空白，但事件必须占一行。
+时间支持 `Z` 或 `±HH:MM`，可带 1–6 位小数秒。用户名支持 ASCII 字母、数字及
+`_`、`-`、`.`、`@`。仓库 [samples](samples) 使用虚构账号和文档示例 IP。
 
-SSH 支持传统 syslog `sshd[PID]` 的 Accepted password、Accepted publickey、
-Failed password（含 invalid user）。publickey 的 ssh2 后附加元数据只保留于
-原始日志，不作解释。其他认证方式及连接状态消息返回 `None`。
-SSH timestamp 的年份与时区必须由调用者提供，不读取当前时间，也不推断跨年：
+### 3.2 增量持久化
 
-```python
-from datetime import timezone
-from app.parsers.ssh import parse_ssh_line
-from app.parsers.web import parse_web_line
+采集器以二进制方式读取 UTF-8 日志，持久化的是**字节偏移**，支持 LF/CRLF 和多字节字符。
+末尾未换行的半条记录留待下次处理；无效 UTF-8 字节使用替换字符解码。
+无关行与解析失败行分别计数并推进偏移，避免坏行永久阻塞。
 
-ssh = "Oct  5 13:42:12 host sshd[1001]: Failed password for root from 192.0.2.10 port 52111 ssh2"
-event = parse_ssh_line(ssh, year=2026, tzinfo=timezone.utc)
-web = "2026-10-05T13:42:12+08:00 LOGIN username=alice ip=198.51.100.20 result=SUCCESS"
-event = parse_web_line(web)
+| SQLite 表 | 职责 |
+| --- | --- |
+| `login_events` | 规范化事件与原始日志 |
+| `collector_offsets` | 规范化绝对路径、inode 与下一读取字节位置 |
+| `alerts` | 告警状态、时间范围、次数和核查备注 |
+| `alert_occurrences` | 检测 occurrence 身份与告警归属 |
+| `alert_event_links` | 告警与真实事件 ID 的关联 |
+
+正常追加从已保存偏移续读；inode 改变或文件大小小于已保存偏移时从头读取当前文件。
+事件插入与偏移更新同事务提交，数据库失败时一起回滚。重启后从 SQLite 恢复偏移，
+避免重复采集；不会通过事件内容去重，因为相同内容可能代表不同登录尝试。
+
+### 3.3 异常检测
+
+| 规则 | 默认条件 | 默认冷却 |
+| --- | --- | --- |
+| `failure_burst` | 同一 IP 在 60 秒内至少 5 次登录失败 | 300 秒 |
+| `multi_account` | 同一 IP 在 300 秒内失败尝试至少 4 个不同用户名 | 600 秒 |
+
+两条规则都只计失败事件，SSH/Web 事件合并按 source_ip 分组。多个账号在共享 IP
+下成功登录不会因此触发 multi_account；重复用户名不增加不同账号数。
+
+时间窗口双端包含，恰好等于窗口长度时计入，多 1 微秒则移出。事件按 timestamp、ID
+排序，使用滑动窗口与用户名计数表。首次达标后固定簇起点，纳入仍在窗口内的后续事件，
+越界后开始新簇，形成有界、不重叠的贪心匹配，而非枚举所有重叠窗口。
+
+[config/default.toml](config/default.toml) 提供 enabled、时间窗口、阈值和冷却参数。
+每次加载配置后生效；缺字段、未知字段、错误类型以及非正整数均明确报错，bool 不作为整数接受。
+检测本身只返回带真实事件 ID 的 `DetectionMatch`，不写告警。
+
+### 3.4 告警管理
+
+告警以稳定的 `rule_type|source_ip` 为 fingerprint，不同规则或 IP 分别管理。
+failure_burst 严重度为 medium，multi_account 为 high。
+
+- **聚合与冷却**：选择同 fingerprint 最新的 OPEN / CONFIRMED 告警；新匹配结束时间
+  `<= last_seen + cooldown` 时聚合，边界包含，否则新建。
+- **Occurrence 计数**：`occurrence_count` 表示不同检测匹配的数量，不是事件数量。
+  first_seen 取最小值，last_seen 取最大值，乱序旧匹配不会让时间倒退。
+- **SHA-256 幂等**：使用规则、IP、UTC 窗口起止和排序后的事件 ID 生成 occurrence key。
+  相同匹配重复处理或进程重启不会重复计数；重叠事件链接取并集。
+- **事务一致性**：告警更新、occurrence 和事件链接一起提交或回滚。
+- **历史追溯**：通过事件链接查询真实 `LoginEvent` 与 raw_log，核查不会删除历史事件。
+
+| 状态枚举 | 存储/API 值 | 含义 |
+| --- | --- | --- |
+| `OPEN` | `open` | 待核查，可聚合 |
+| `CONFIRMED` | `confirmed` | 已确认，可继续聚合且保持状态 |
+| `FALSE_POSITIVE` | `false_positive` | 已标记误报，关闭历史 |
+| `RESOLVED` | `resolved` | 已解决，关闭历史 |
+
+允许 OPEN → CONFIRMED / FALSE_POSITIVE / RESOLVED，以及 CONFIRMED →
+FALSE_POSITIVE / RESOLVED；不支持重开或同状态重复操作。备注最多 2000 字符，
+允许 None 或空字符串。关闭后相同历史 occurrence 仍视为重复，新的 occurrence 创建新告警。
+冷却当前用于告警聚合，**不包含通知发送**。
+
+### 3.5 查询 API
+
+提供告警列表、告警详情、事件详情和统计接口。列表支持状态、规则、IP 过滤及分页，
+按 last_seen DESC、id DESC 确定排序。详情返回真实事件 ID 和原始日志。
+
+查询值使用 SQL 绑定参数；空数据库返回空列表或零统计，首次查询可初始化空 schema。
+统计使用 SQLite GROUP BY：汇总、来源与规则统计覆盖全部历史告警；趋势按 first_seen
+的 UTC 日期统计最近 N 天，并补齐零值日期。统计单位为告警行，不是 occurrence 或事件数。
+
+### 3.6 安全态势展示
+
+Dashboard 使用 **FastAPI + Jinja2 + ECharts**，包含：
+
+- 总告警、待核查、已确认统计卡；
+- 每日告警趋势、来源 IP Top N、规则分布；
+- 告警状态筛选、分页与关联事件追溯。
+
+页面只读，提供手动刷新、空数据和请求失败提示。原始日志以纯文本显示。
+ECharts 通过固定版本 CDN 加载；图表库不可用时，统计卡和告警表仍可展示。
+
+## 4. 技术实现
+
+| 组件 | 实现 |
+| --- | --- |
+| 运行环境 | Python ≥ 3.8；开发推荐 Python 3.10+；Linux / WSL |
+| 解析与模型 | 标准库 re、ipaddress、datetime、dataclasses、Enum |
+| 持久化 | sqlite3，无 ORM；参数化 SQL、外键与显式事务边界 |
+| 配置 | TOML；Python 3.8–3.10 使用 tomli，3.11+ 使用 tomllib |
+| Web 与展示 | FastAPI、Uvicorn、Jinja2、ECharts |
+| 测试 | pytest、httpx / FastAPI TestClient |
+
+时间统一存储为带 6 位小数秒和 `+00:00` 的 UTC ISO 8601 字符串。
+检测时间范围与 SSH 时间上下文由调用者提供，元数据和查询时钟可注入，便于确定性测试。
+保留 Python 3.8 兼容性用于 Ubuntu 20.04 类主机；不意味着 Python 3.8 仍由上游维护。
+
+主要目录：`app/collectors`、`parsers`、`detectors`、`alerts` 分别负责处理链路；
+`models` 定义领域模型，`db` 提供存储，`services` 编排流程，`api` 提供 HTTP 查询；
+`templates` 和 `static` 提供页面资源，`scripts` 提供一次性 CLI。
+
+## 5. 快速开始
+
+**安装**（在仓库根目录执行）：
+
+```bash
+git clone https://github.com/wangcy1124-droid/login-sentry.git
+cd login-sentry
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[test]"
 ```
 
-`samples/ssh.log` 和 `samples/web.log` 使用 RFC 5737 / RFC 3849 文档地址，
-包含成功、失败和无关行；均为虚构日志，不含真实基础设施数据。
+已克隆仓库可直接进入目录。系统需具备对应 Python 的 venv/ensurepip 支持。
 
-## 一次性增量采集
-
-先按上文安装项目，在仓库根目录激活虚拟环境后执行：
+**采集样例、检测并生成告警**：
 
 ```bash
 python scripts/ingest_file.py --type web --path samples/web.log --database data/login-sentry.sqlite3
-python scripts/ingest_file.py --type ssh --path samples/ssh.log --database data/login-sentry.sqlite3 --year 2026 --timezone +00:00
-```
-
-输出 `lines_read`、`events_inserted`、`ignored_lines`、`parse_errors`。
-首次采集样例分别写入 Web 3 条、SSH 4 条事件；文件未变化时再次运行均为 0。
-默认数据库为 `data/login-sentry.sqlite3`，首次打开自动幂等建表及索引。
-自定义数据库的父目录须已存在。SSH 必须显式提供 year 和 timezone，
-支持 `Z`、`+00:00`、`+08:00`、`-04:00`；负偏移使用 `--timezone=-04:00`。
-
-采集器以 `rb` 读取，只在遇到 LF 后处理完整行（支持 CRLF）。UTF-8 无效字节
-用 U+FFFD 替换，再交给 parser；不会按 Unicode 分隔符拆行。末尾无换行的
-半行保持未消费，后续补齐后再处理。无关行推进偏移并计入 ignored；
-`ParseError` 推进偏移并单独计数，避免坏行永久阻塞。其他异常向调用者传播。
-
-每条完整行的可选事件插入与偏移更新使用同一个 SQLite 事务；数据库失败时
-两者一起回滚，之前已提交的行保留。仓库写方法不自行 commit，由调用者管理
-事务。采集器要求空闲、启用事务的连接。UTC 存储格式固定为带 6 位小数秒和
-`+00:00` 的 ISO 时间，读取时恢复 aware UTC datetime 与枚举。
-创建/更新时间由可注入 clock 提供；事件时间始终来自日志/显式 SSH 上下文。
-
-状态键使用 `Path.resolve()` 的绝对路径，包含已打开文件描述符的 inode 与
-下一读取位置的字节偏移。相同 inode 且文件大小不小于偏移时续读；大小小于
-偏移时从 0 开始；inode 变化时读取当前路径的新文件。空文件或仅含半行的新
-文件可保存偏移 0。负偏移/非法 inode 会报错，输入文件缺失不会自动创建。
-两次内容完全相同的登录仍可分别存储，避免重复依靠持久化偏移而非事件唯一约束。
-
-当前限制：同步一次性执行，假设每个数据库/来源工作流只有一个写入者；
-不追读轮转后重命名的旧文件，也不处理动态符号链接轮转方案。若截断后已重新
-增长到保存偏移以上，仅凭 inode/size 无法识别；并发写入中的任意截断亦不保证
-无遗漏。保持同一来源的 parser 类型与 SSH 上下文稳定；本阶段没有后台轮询。
-
-## 异常检测
-
-```bash
+python scripts/ingest_file.py --type ssh --path samples/ssh.log --database data/login-sentry.sqlite3 --year 2026 --timezone Z
 python scripts/detect_anomalies.py --database data/login-sentry.sqlite3 --config config/default.toml
+python scripts/process_alerts.py --database data/login-sentry.sqlite3 --config config/default.toml
 ```
 
-命令一次性评估已保存事件，输出规则、IP、实际事件数、不同用户名数、窗口起止
-和 SQLite event_ids，最后输出 `matches=N`。不打印 raw_log，不写入告警。
-数据库不存在时初始化空 schema 并输出 `matches=0`（父目录须存在）；空数据库
-同样返回 0。重复检测相同数据库/config 输出一致，不保存检测状态。
+首次采集样例分别写入 Web 3 条、SSH 4 条事件；样例用于展示解析，**不保证触发默认告警阈值**。
+文件未变化时再次采集不写入事件；相同匹配再次处理不增加 occurrence_count。
+SSH 时区支持 `Z`、`+08:00` 等固定偏移，负偏移使用 `--timezone=-04:00`。
 
-默认配置：failure_burst 为 60 秒内至少 5 次失败；multi_account 为 300 秒内
-失败尝试至少 4 个不同用户名。两条规则都仅计 FAILURE；成功登录不计数。
-因此共享 NAT IP 下多个用户成功登录不会仅因账号多而触发。SSH/Web 合并按
-规范化 source_ip 分组，支持 IPv4/IPv6，同一事件簇可以同时触发两条规则。
-
-候选窗口 `[T - window_seconds, T]` 两端包含；边界恰好等于窗口时计入，
-多 1 微秒则移出。每个 IP 输入按 timestamp/id 升序。算法使用双指针和活动
-用户名计数表，每个 IP 线性扫描；不为每条事件重复生成重叠匹配：
-
-1. 尚未达标时滑动左边界，移出过期失败。
-2. 首次达标后固定当前最早事件，纳入仍在该时限内的后续失败。
-3. 下一条超出时输出当前簇，从该下一条重新开始；不会重用前簇尾部生成重叠匹配。
-
-这是有界、不重叠的贪心合并策略，每个匹配跨度不超过配置窗口；它不枚举所有
-可能的重叠窗口。`window_start/end` 是实际纳入事件的最早/最晚时间，event_ids
-按 timestamp/id 排序且簇内唯一。输出按 window_end、source_ip、rule_type 排序。
-
-Python 服务 `app.services.detection.detect(connection, config, start_time=None,
-end_time=None)` 可指定 aware 时间范围；转换为 UTC 后由参数化 SQLite 查询
-筛选范围内失败。范围也是双端包含，范围外事件不作为窗口上下文补入。
-未指定范围则评估全部已存失败，没有隐式当前时间截止。倒置范围和 naive 时间
-会报错。纯规则函数只处理事件序列，不访问数据库或文件。
-
-`config/default.toml` 的两个规则表要求 `enabled` 布尔值、正整数 window_seconds、
-对应阈值和 cooldown_seconds；拒绝缺字段、未知字段、错误类型及 bool 冒充整数。修改 TOML 后下一次
-加载即可生效；`enabled=false` 独立关闭对应规则。显式配置路径缺失或格式错误
-直接报错，不回退。Python 3.8–3.10 使用轻量 tomli，3.11+ 使用标准库 tomllib。
-
-## 告警聚合与人工核查
+**启动页面与 API**：
 
 ```bash
-python scripts/process_alerts.py --database data/login-sentry.sqlite3 --config config/default.toml
-python scripts/review_alert.py --database data/login-sentry.sqlite3 --alert-id 1 --status false_positive --note "shared office NAT"
+python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-处理命令先加载配置，再初始化数据库、检测和处理匹配。新空库输出全零统计。
-输出 matches_seen、alerts_created、alerts_aggregated、duplicate_occurrences、links_added。
-检测 CLI 仍然不写告警记录；schema 初始化会添加空的告警表。
+访问 `http://127.0.0.1:8000/`。健康检查为 `GET /api/health`，返回
+`{"status":"ok","service":"login-sentry"}`。使用 Ctrl+C 停止服务。
 
-fingerprint 是稳定文本 `rule_type|source_ip`，不同规则或 IP 分开处理。
-failure_burst 严重度 medium、冷却 300 秒；multi_account 严重度 high、冷却
-600 秒。配置中的 cooldown_seconds 必须是正整数，不接受 bool、缺字段或未知字段；
-Python 配置对象保留默认冷却值，已有三参数构造仍兼容。
-
-只选择同 fingerprint 最新（last_seen、id 降序）的 open/confirmed 告警。
-新 occurrence 的 window_end <= last_seen + cooldown 时聚合，恰好边界包含，
-多 1 微秒则新建。乱序旧匹配也归入最新活动告警，first_seen 取最小值，last_seen
-取最大值，绝不倒退；不会回溯重组旧告警。冷却用于聚合，未实现任何通知发送。
-
-occurrence_count 是不同 DetectionMatch 的数量，不是事件数量。occurrence key
-使用规则、IP、UTC 窗口起止和排序后的真实事件 ID 的 JSON 做 SHA-256。
-完全相同匹配重复运行、进程重启或人工关闭后再次运行均只计 duplicate_occurrences，
-不递增次数、不增加链接。已有簇因追加事件或改配置而改变匹配身份时，是新的 occurrence；
-链接取并集，即使匹配包含重叠事件也不重复链接。
-
-每个 occurrence 的告警插入/更新、occurrence 写入、事件链接位于同一事务；任一步
-失败全部回滚，之前已提交的 occurrence 保留。要求单写入者、空闲且启用事务的连接。
-时间存储沿用固定 6 位小数 UTC；事件窗口来自匹配，元数据时钟可注入。
-初始化旧数据库只添加表/索引，不删除原有事件和偏移。
-
-核查允许 open → confirmed/false_positive/resolved，以及 confirmed →
-false_positive/resolved。拒绝同状态重复操作、关闭后重开及其他转换。
-confirmed 聚合仍保持 confirmed；false_positive/resolved 为关闭历史，新的
-occurrence 创建 open 告警，不复用关闭记录。核查不删除事件、occurrence 或链接。
-review_note 允许 None、空字符串（原样保存）及最多 2000 字符普通文本。
-
-`AlertRepository.list_events(alert_id)` 返回带真实 SQLite ID 的 StoredLoginEvent，
-按 timestamp/id 排序，可沿 `record.event.raw_log` 追溯原始日志。
-`alerts` 不重复保存 raw_log；`alert_event_links` 使用复合主键和外键防止重复/孤立链接。
-
-## 查询 API 与 Dashboard
-
-启动后访问 `http://127.0.0.1:8000/`：三张告警统计卡、7 日趋势折线图、
-来源 IP 柱状图、规则分布饼图，以及带状态筛选和分页的告警表。
-点击“查看事件”可读取关联原始日志；页面只读，人工核查继续使用既有 CLI。
-页面使用 Jinja2 与固定版本 ECharts 5.6.0 CDN，不使用前端框架。
-CDN 需要浏览器可联网；加载失败时仍显示统计卡和告警表并提示原因。
-没有自动轮询，点击刷新获取最新数据。
-
-API 默认使用 `data/login-sentry.sqlite3`。可指定与采集 CLI 相同的数据库：
+CLI 与 API 默认使用 `data/login-sentry.sqlite3`。自定义数据库的父目录须存在，
+并确保 API 和 CLI 指向同一文件：
 
 ```bash
 LOGIN_SENTRY_DATABASE=/absolute/path/events.sqlite3 python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-父目录须存在；首次查询不存在的数据库时初始化空 schema。请求使用独立连接，
-同一响应内的读取处于一个事务；除幂等建表外不写业务记录。健康检查与页面本身
-不打开数据库。无认证，默认示例仅监听本机；不要将含原始日志的 API 直接公开。
+**人工核查**（将 ID 替换为实际告警 ID）：
 
-| Endpoint | 参数 / 返回 |
+```bash
+python scripts/review_alert.py --database data/login-sentry.sqlite3 --alert-id 1 --status false_positive --note "shared office NAT"
+```
+
+运行数据库、日志与凭据不应提交 Git。
+
+## 6. API 示例
+
+| 接口 | 参数 / 返回 |
 | --- | --- |
-| `GET /api/alerts` | 可选 status、rule_type、source_ip；limit 默认 50（1–100）、offset 默认 0（非负）；返回 items、total |
-| `GET /api/alerts/{alert_id}` | alert 与 events；含真实事件 ID 和 raw_log |
-| `GET /api/events/{event_id}` | id、timestamp、source_type、source_ip、username、result、raw_log |
-| `GET /api/statistics/summary` | 总告警数及四种状态数量 |
-| `GET /api/statistics/trend` | days 默认 7（1–366），每日 date/count |
-| `GET /api/statistics/sources` | limit 默认 10（1–100），来源 IP/count |
+| `GET /api/alerts` | status、rule_type、source_ip 可选；limit 默认 50（1–100），offset 默认 0；返回 items、total |
+| `GET /api/alerts/{id}` | 告警信息及关联 events |
+| `GET /api/events/{id}` | timestamp、source_type、username、source_ip、result、raw_log 与 ID |
+| `GET /api/statistics/summary` | total_alerts 及四种状态数量 |
+| `GET /api/statistics/trend` | days 默认 7（1–366），返回 date/count |
+| `GET /api/statistics/sources` | limit 默认 10（1–100），返回 source_ip/count |
 | `GET /api/statistics/rules` | rule_type/count |
 
-列表按 last_seen DESC、id DESC，total 为过滤后分页前总数；IP 过滤支持规范化
-IPv4/IPv6。状态与规则类型使用现有枚举值。参数非法返回 422，详情不存在返回 404。
-时间返回带时区的 ISO 8601，source_type 与 result 沿用小写枚举（ssh/web、success/failure）。
-链接事件按 timestamp、ID 升序。字符串在页面以纯文本显示。
+列表查询示例：
 
-统计计数单位是告警行，不是 occurrence_count，也不是事件数。summary、sources、rules
-覆盖全部历史告警；sources 按数量降序、IP 升序，rules 按规则名排序。
-trend 按 first_seen 的 UTC 日期统计，从今天前 days−1 天的 00:00 到明天
-00:00（左闭右开），缺失日期补零；默认当前时间可在 create_app 的 clock 参数中
-注入以便测试。各统计使用 SQL GROUP BY，不将完整告警表加载到 Python。
+```bash
+curl --noproxy 127.0.0.1 'http://127.0.0.1:8000/api/alerts?status=open&rule_type=failure_burst&source_ip=192.0.2.10&limit=10&offset=0'
+curl --noproxy 127.0.0.1 http://127.0.0.1:8000/api/alerts/1
+curl --noproxy 127.0.0.1 http://127.0.0.1:8000/api/statistics/summary
+curl --noproxy 127.0.0.1 'http://127.0.0.1:8000/api/statistics/trend?days=7'
+curl --noproxy 127.0.0.1 'http://127.0.0.1:8000/api/statistics/sources?limit=10'
+```
 
-## 配置与运行数据
+空列表响应为 `{"items":[],"total":0}`。详情不存在返回 404，非法参数返回 422。
+时间为带时区 ISO 8601；来源和结果沿用小写枚举 `ssh/web`、`success/failure`。
+详情事件按 timestamp、ID 升序。来源统计按 count 降序、IP 升序；趋势范围为
+今天之前 days−1 天的 UTC 00:00 至明天 UTC 00:00，左闭右开。
 
-`config/default.toml` 当前仅加载 `[rules]`。其他配置段仍预留，数据库路径由 CLI 提供。
-`data/` 存放运行数据，除 `.gitkeep` 外不提交 Git；`samples/`
-保存脱敏样例，`scripts/` 提供采集 CLI，`tests/unit/` 与 `tests/integration/`
-包含模型、解析器、数据库、采集、检测与 CLI 测试；
-`tests/scenarios/` 包含正常输错、连续失败、共享 IP 与窗口边界四类持久化场景测试。禁止提交凭据和运行日志。
+## 7. 测试验证
 
-## 后续开发
+```bash
+python -m compileall app scripts tests
+pytest -q
+git diff --check
+```
 
-尚未实现真实通知、认证和多用户管理。检测本身仍只返回匹配，
-独立告警服务负责持久化与核查。
+Stage 5 提交 `300b8ae7c67085fed0676938bd26b40b6119afe4` 已完成服务器独立验证：
 
-具体阶段与顺序由 ChatGPT 主审查窗口决定。Stage 5 提交并推送后停止，
-审查通过并收到下一阶段指令后才继续。服务器只拉取 GitHub exact commit SHA
-进行独立测试和运行验证。角色及修改纪律见 `AGENTS.md`。
+| 运行时 | 测试结果 | Warning |
+| --- | --- | --- |
+| Python 3.8.20 | 265 passed | 无 |
+| Python 3.10.22 | 265 passed | 1 条既有 AnyIO BlockingPortal alias 弃用提示 |
+
+覆盖 parser、增量 collector、detector、告警生命周期、事务回滚、幂等恢复、API 与 Dashboard
+页面/静态资源。场景测试包含正常输错、连续失败、共享 IP 和时间窗口边界。
+服务器还验证了日志采集 → 检测 → 告警 → HTTP 查询的完整流程，以及空数据库返回。
+Dashboard 验证包含 HTTP 200、HTML、ECharts 引用和 CSS/JS 资源，不包含浏览器视觉自动化验收。
+
+## 8. 项目限制
+
+- 未实现通知发送、认证、多用户管理或分布式部署；当前 API 可读取原始日志，应在受控网络使用。
+- 采集、检测、告警均为同步一次性任务，没有后台轮询、调度器或 daemon。
+- 假设每个数据库/来源处理流程只有一个写入者，不提供多进程采集协调。
+- inode 变化后只读取当前路径，不追读重命名的旧文件；截断后迅速增长至原偏移以上可能无法识别。
+  不处理动态符号链接轮转，也不保证并发截断时无遗漏。
+- SSH 不推断年份、时区或跨年轮转；Web 仅支持本文定义的格式，不是通用日志解析器。
+- 检测采用有界、不重叠匹配；配置或新增事件改变匹配身份后会形成新的 occurrence，
+  事件链接仍去重。乱序旧匹配归入最新活动告警，不回溯重组历史告警。
+- Dashboard 依赖浏览器可访问 ECharts CDN，统计和列表需手动刷新。
+
+## 9. 后续规划
+
+可评估系统服务运行方式、访问控制及外部通知集成。容器化可作为可选部署方式，
+不作为强制依赖；扩展前优先保留 SQLite 与当前轻量架构。
+
+以上仅为候选方向，不代表已实现。后续工作经独立审查后确定，项目协作规则见
+[AGENTS.md](AGENTS.md)。
